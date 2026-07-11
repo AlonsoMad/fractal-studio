@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import type { FractalMode, ParseError, ParameterInfo } from '../types/index.ts';
+import type { ASTNode, FractalMode, ParseError, ParameterInfo } from '../types/index.ts';
 import { FormulaEngine } from '../engine/formulas/FormulaEngine.ts';
 
 interface FormulaState {
   formulaText: string;
   mode: FractalMode;
   compiledWGSL: string;
+  compiledAST: ASTNode | null;
   errors: ParseError[];
   parameters: ParameterInfo[];
   parameterValues: Record<string, number>;
@@ -22,6 +23,7 @@ export const useFormulaStore = create<FormulaState>((set, get) => ({
   formulaText: 'z^2 + c',
   mode: 'escape_time',
   compiledWGSL: '',
+  compiledAST: null,
   errors: [],
   parameters: [],
   parameterValues: {},
@@ -39,6 +41,7 @@ export const useFormulaStore = create<FormulaState>((set, get) => ({
     set({
       formulaText: text,
       compiledWGSL: result.wgslCode,
+      compiledAST: result.ast,
       errors: result.errors,
       parameters: result.parameters,
       parameterValues: newValues,

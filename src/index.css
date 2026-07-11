@@ -894,6 +894,77 @@ html, body {
   line-height: 1.6;
 }
 
+/* ─── GPU Detection Loading ──────────────────────────────────── */
+
+.viewport-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  background: var(--bg-primary);
+  color: var(--text-tertiary);
+  z-index: 10;
+}
+
+.viewport-loading p {
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  animation: viewport-loading-pulse 1.5s ease-in-out infinite;
+}
+
+.viewport-loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: viewport-spinner 0.8s linear infinite;
+}
+
+@keyframes viewport-spinner {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes viewport-loading-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* ─── Canvas2D Fallback Badge ────────────────────────────────── */
+
+.viewport-fallback-badge {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent-orange);
+  background: rgba(7, 7, 13, 0.85);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 170, 0, 0.2);
+  backdrop-filter: blur(8px);
+  cursor: help;
+  pointer-events: auto;
+  z-index: 5;
+  transition: opacity 0.3s ease;
+}
+
+.viewport-fallback-badge:hover {
+  opacity: 0.7;
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Julia Mode Toggle
    ════════════════════════════════════════════════════════════════════ */

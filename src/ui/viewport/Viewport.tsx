@@ -1,14 +1,38 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
 import { WebGPURenderer, type RenderUniforms } from '../../engine/renderer/WebGPURenderer.ts';
+import { Canvas2DRenderer, type Canvas2DUniforms } from '../../engine/renderer/Canvas2DRenderer.ts';
 import { useFormulaStore } from '../../state/formulaStore.ts';
 import { useNavigationStore } from '../../state/navigationStore.ts';
 import { useColorStore } from '../../state/colorStore.ts';
 
+type RendererBackend = 'webgpu' | 'canvas2d';
+
+/**
+ * Detects whether WebGPU is actually usable (not just that navigator.gpu exists).
+ */
+async function detectWebGPU(): Promise<boolean> {
+  if (typeof navigator === 'undefined' || !navigator.gpu) return false;
+
+  try {
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) return false;
+
+    // Try to actually get a device — this is where it fails on Firefox nightly
+    // even when navigator.gpu is partially exposed
+    const device = await adapter.requestDevice();
+    device.destroy();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function Viewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const rendererRef = useRef<WebGPURenderer | null>(null);
-  const [supported, setSupported] = useState(true);
+  const rendererRef = useRef<WebGPURenderer | Canvas2DRenderer | null>(null);
+  const backendRef = useRef<RendererBackend>('webgpu');
+  const [backend, setBackend] = useState<RendererBackend | null>(null); // null = still detecting
   const [initialized, setInitialized] = useState(false);
   const [mouseCoords, setMouseCoords] = useState({ re: 0, im: 0 });
 
@@ -19,7 +43,7 @@ export function Viewport() {
 
 
   // ─── Sync helpers ─────────────────────────────────────
-  const syncUniforms = useCallback((renderer: WebGPURenderer) => {
+  const syncUniforms = useCallback((renderer: WebGPURenderer | Canvas2DRenderer) => {
     const nav = useNavigationStore.getState();
     const color = useColorStore.getState();
     const formula = useFormulaStore.getState();
@@ -33,7 +57,7 @@ export function Viewport() {
       'domain_coloring': 3,
     };
 
-    const uniforms: RenderUniforms = {
+    const uniforms: RenderUniforms & Canvas2DUniforms = {
       centerX: nav.centerX,
       centerY: nav.centerY,
       zoom: nav.zoom,
@@ -53,26 +77,36 @@ export function Viewport() {
     renderer.updateUniforms(uniforms);
   }, []);
 
-  const syncGradient = useCallback((renderer: WebGPURenderer) => {
+  const syncGradient = useCallback((renderer: WebGPURenderer | Canvas2DRenderer) => {
     const color = useColorStore.getState();
     renderer.updateGradient(color.gradient);
   }, []);
 
-  // ─── Initialize WebGPU ─────────────────────────────────
+  // ─── Initialize renderer ─────────────────────────────────
   useEffect(() => {
-    if (!navigator.gpu) {
-      setSupported(false);
-      return;
-    }
-
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const renderer = new WebGPURenderer();
-    rendererRef.current = renderer;
+    let cancelled = false;
 
-    const init = async () => {
-      // Set canvas size
+    const initRenderer = async () => {
+      // Phase 1: Detect WebGPU support
+      const webgpuAvailable = await detectWebGPU();
+
+      if (cancelled) return;
+
+      const selectedBackend: RendererBackend = webgpuAvailable ? 'webgpu' : 'canvas2d';
+      backendRef.current = selectedBackend;
+      setBackend(selectedBackend);
+
+      if (!webgpuAvailable) {
+        console.info(
+          '%c[Fractal Studio] WebGPU not available — using Canvas2D fallback renderer.',
+          'color: #ffa500; font-weight: bold;'
+        );
+      }
+
+      // Phase 2: Set canvas size
       const container = containerRef.current;
       if (container) {
         canvas.width = container.clientWidth * window.devicePixelRatio;
@@ -81,37 +115,75 @@ export function Viewport() {
         canvas.style.height = container.clientHeight + 'px';
       }
 
-      const ok = await renderer.init(canvas);
+      // Phase 3: Initialize the chosen renderer
+      if (selectedBackend === 'webgpu') {
+        const renderer = new WebGPURenderer();
+        rendererRef.current = renderer;
+
+        const ok = await renderer.init(canvas);
+        if (!ok) {
+          // WebGPU init failed at device level — fall back
+          console.warn('WebGPU initialization failed, falling back to Canvas2D');
+          renderer.destroy();
+          return initCanvas2D(canvas);
+        }
+
+        // Initial compile
+        const formulaState = useFormulaStore.getState();
+        formulaState.setFormula(formulaState.formulaText);
+        const compiled = useFormulaStore.getState();
+
+        if (compiled.compiledWGSL) {
+          renderer.compileFormula(
+            compiled.compiledWGSL,
+            compiled.parameters.map(p => p.name)
+          );
+        }
+
+        syncUniforms(renderer);
+        syncGradient(renderer);
+        renderer.start();
+        setInitialized(true);
+      } else {
+        initCanvas2D(canvas);
+      }
+    };
+
+    const initCanvas2D = (canvas: HTMLCanvasElement) => {
+      if (cancelled) return;
+
+      const renderer = new Canvas2DRenderer();
+      rendererRef.current = renderer;
+      backendRef.current = 'canvas2d';
+      setBackend('canvas2d');
+
+      const ok = renderer.init(canvas);
       if (!ok) {
-        setSupported(false);
+        console.error('Canvas2D initialization failed');
         return;
       }
 
-      setInitialized(true);
-
-      // Initial compile
+      // Initial compile from AST
       const formulaState = useFormulaStore.getState();
       formulaState.setFormula(formulaState.formulaText);
       const compiled = useFormulaStore.getState();
 
-      if (compiled.compiledWGSL) {
-        renderer.compileFormula(
-          compiled.compiledWGSL,
-          compiled.parameters.map(p => p.name)
-        );
+      if (compiled.compiledAST) {
+        renderer.compileFormula(compiled.compiledAST, compiled.mode === 'newton' ? 'newton' : 'escape_time');
       }
 
-      // Initial uniforms & gradient
       syncUniforms(renderer);
       syncGradient(renderer);
-
       renderer.start();
+      setInitialized(true);
     };
 
-    init();
+    initRenderer();
 
     return () => {
-      renderer.destroy();
+      cancelled = true;
+      const r = rendererRef.current;
+      if (r) r.destroy();
       rendererRef.current = null;
     };
   }, []);
@@ -124,13 +196,23 @@ export function Viewport() {
       const renderer = rendererRef.current;
       if (!renderer) return;
 
-      // Recompile if WGSL changed
-      if (state.compiledWGSL !== prev.compiledWGSL && state.compiledWGSL) {
-        renderer.compileFormula(
-          state.compiledWGSL,
-          state.parameters.map(p => p.name)
-        );
-        syncUniforms(renderer);
+      if (backendRef.current === 'webgpu') {
+        const webgpu = renderer as WebGPURenderer;
+        // Recompile if WGSL changed
+        if (state.compiledWGSL !== prev.compiledWGSL && state.compiledWGSL) {
+          webgpu.compileFormula(
+            state.compiledWGSL,
+            state.parameters.map(p => p.name)
+          );
+          syncUniforms(webgpu);
+        }
+      } else {
+        const canvas2d = renderer as Canvas2DRenderer;
+        // Recompile if AST changed
+        if (state.compiledAST !== prev.compiledAST && state.compiledAST) {
+          canvas2d.compileFormula(state.compiledAST, state.mode === 'newton' ? 'newton' : 'escape_time');
+          syncUniforms(canvas2d);
+        }
       }
 
       // Update uniforms if only params changed
@@ -269,22 +351,14 @@ export function Viewport() {
 
 
   // ─── Render ────────────────────────────────────────────
-  if (!supported) {
+  // Still detecting backend...
+  if (backend === null) {
     return (
       <div className="viewport-container" ref={containerRef}>
-        <div className="viewport-unsupported">
-          <div className="viewport-unsupported-icon">
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-orange)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-              <line x1="12" y1="9" x2="12" y2="13"></line>
-              <line x1="12" y1="17" x2="12.01" y2="17"></line>
-            </svg>
-          </div>
-          <h2>WebGPU Not Supported</h2>
-          <p>
-            Fractal Studio requires WebGPU to render. Please use Chrome 113+, Edge 113+,
-            or a Chromium-based browser with WebGPU enabled.
-          </p>
+        <canvas ref={canvasRef} className="viewport-canvas" style={{ opacity: 0 }} />
+        <div className="viewport-loading">
+          <div className="viewport-loading-spinner" />
+          <p>Detecting GPU capabilities…</p>
         </div>
       </div>
     );
@@ -305,6 +379,16 @@ export function Viewport() {
         onMouseLeave={handleMouseUp}
         onDoubleClick={handleDoubleClick}
       />
+      {backend === 'canvas2d' && (
+        <div className="viewport-fallback-badge" title="WebGPU is not available in this browser. Rendering with Canvas2D (CPU). For best performance, use Chrome or Edge.">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          CPU Mode
+        </div>
+      )}
       <div className="viewport-coords">
         {mouseCoords.re >= 0 ? ' ' : ''}{mouseCoords.re.toFixed(8)} {mouseCoords.im >= 0 ? '+' : '-'} {Math.abs(mouseCoords.im).toFixed(8)}i
       </div>
