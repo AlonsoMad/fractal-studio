@@ -47,9 +47,12 @@ export function Viewport() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<WebGPURenderer | Canvas2DRenderer | null>(null);
-  const backendRef = useRef<RendererBackend>('webgpu');
-  const [backend, setBackend] = useState<RendererBackend | null>(null); // null = still detecting
+  const backendRef = useRef<RendererBackend>('canvas2d');
+  // CPU is the main mode; GPU (WebGPU) is opt-in via the badge button.
+  const [backendPref, setBackendPref] = useState<'cpu' | 'gpu'>('cpu');
+  const [backend, setBackend] = useState<RendererBackend | null>(null);
   const [initialized, setInitialized] = useState(false);
+  const [gpuFailed, setGpuFailed] = useState(false);
   const [mouseCoords, setMouseCoords] = useState({ re: 0, im: 0 });
 
   // Dragging state
@@ -98,34 +101,15 @@ export function Viewport() {
     renderer.updateGradient(color.gradient);
   }, []);
 
-  // ─── Initialize renderer ─────────────────────────────────
+  // ─── Initialize renderer (re-runs when the user toggles CPU/GPU) ──
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     let cancelled = false;
+    setInitialized(false);
 
-    const initRenderer = async () => {
-      console.info('%c[Fractal Studio] Starting GPU capability detection...', 'color: #3b82f6; font-weight: bold;');
-      // Phase 1: Detect WebGPU support
-      const webgpuAvailable = await detectWebGPU();
-
-      if (cancelled) return;
-
-      const selectedBackend: RendererBackend = webgpuAvailable ? 'webgpu' : 'canvas2d';
-      backendRef.current = selectedBackend;
-      setBackend(selectedBackend);
-
-      console.info(`%c[Fractal Studio] Selected Rendering Backend: ${selectedBackend.toUpperCase()}`, 'color: #a855f7; font-weight: bold; font-size: 13px;');
-
-      if (!webgpuAvailable) {
-        console.info(
-          '%c[Fractal Studio] WebGPU not available or device initialization failed — using Canvas2D (CPU + Web Worker JIT) fallback renderer.',
-          'color: #ffa500; font-weight: bold; font-size: 12px; background: rgba(255, 165, 0, 0.1); padding: 4px 8px; border-radius: 4px;'
-        );
-      }
-
-      // Phase 2: Set canvas size
+    const sizeCanvas = () => {
       const container = containerRef.current;
       if (container) {
         canvas.width = container.clientWidth * window.devicePixelRatio;
@@ -133,54 +117,12 @@ export function Viewport() {
         canvas.style.width = container.clientWidth + 'px';
         canvas.style.height = container.clientHeight + 'px';
       }
-
-      // Phase 3: Initialize the chosen renderer
-      if (selectedBackend === 'webgpu') {
-        console.info('[Fractal Studio] Initializing WebGPURenderer pipeline...');
-        const renderer = new WebGPURenderer();
-        rendererRef.current = renderer;
-
-        const ok = await renderer.init(canvas);
-        if (!ok) {
-          // WebGPU init failed at device level — fall back
-          console.warn('%c[Fractal Studio] WebGPURenderer.init() returned false or threw error. Falling back to Canvas2DRenderer...', 'color: #f97316; font-weight: bold;');
-          renderer.destroy();
-          return initCanvas2D(canvas);
-        }
-        console.info('%c[Fractal Studio] WebGPURenderer initialized successfully!', 'color: #10b981; font-weight: bold;');
-
-        // Initial compile
-        const formulaState = useFormulaStore.getState();
-        formulaState.setFormula(formulaState.formulaText);
-        const compiled = useFormulaStore.getState();
-
-        if (compiled.compiledWGSL) {
-          const result = await renderer.compileFormula(
-            compiled.compiledWGSL,
-            compiled.parameters.map(p => p.name)
-          );
-          if (!result.success) {
-            // Firefox (and other strict WGSL implementations) may reject the
-            // shader even though device init succeeded — fall back to CPU.
-            console.warn(`%c[Fractal Studio] WGSL pipeline rejected: ${result.error}. Falling back to Canvas2DRenderer...`, 'color: #f97316; font-weight: bold;');
-            renderer.destroy();
-            return initCanvas2D(canvas);
-          }
-        }
-
-        syncUniforms(renderer);
-        syncGradient(renderer);
-        renderer.start();
-        setInitialized(true);
-      } else {
-        initCanvas2D(canvas);
-      }
     };
 
     const initCanvas2D = (canvas: HTMLCanvasElement) => {
       if (cancelled) return;
 
-      console.info('[Fractal Studio] Initializing Canvas2DRenderer (CPU Fallback) pipeline...');
+      console.info('[Fractal Studio] Initializing Canvas2DRenderer (CPU) pipeline...');
       const renderer = new Canvas2DRenderer();
       rendererRef.current = renderer;
       backendRef.current = 'canvas2d';
@@ -191,7 +133,7 @@ export function Viewport() {
         console.error('[Fractal Studio] Canvas2DRenderer initialization failed!');
         return;
       }
-      console.info('%c[Fractal Studio] Canvas2DRenderer (CPU Fallback) initialized successfully!', 'color: #10b981; font-weight: bold;');
+      console.info('%c[Fractal Studio] Canvas2DRenderer (CPU) initialized successfully!', 'color: #10b981; font-weight: bold;');
 
       // Initial compile from AST
       const formulaState = useFormulaStore.getState();
@@ -208,7 +150,70 @@ export function Viewport() {
       setInitialized(true);
     };
 
-    initRenderer();
+    const initWebGPU = async (canvas: HTMLCanvasElement) => {
+      console.info('%c[Fractal Studio] GPU mode requested — probing WebGPU capability...', 'color: #3b82f6; font-weight: bold;');
+      const webgpuAvailable = await detectWebGPU();
+      if (cancelled) return;
+
+      if (!webgpuAvailable) {
+        console.warn('%c[Fractal Studio] WebGPU not available — staying on CPU renderer.', 'color: #f97316; font-weight: bold;');
+        setGpuFailed(true);
+        setBackendPref('cpu');
+        return;
+      }
+
+      sizeCanvas();
+
+      console.info('[Fractal Studio] Initializing WebGPURenderer pipeline...');
+      const renderer = new WebGPURenderer();
+      rendererRef.current = renderer;
+
+      const ok = await renderer.init(canvas);
+      if (!ok) {
+        // WebGPU init failed at device level — revert to CPU
+        console.warn('%c[Fractal Studio] WebGPURenderer.init() returned false or threw error. Reverting to Canvas2DRenderer...', 'color: #f97316; font-weight: bold;');
+        renderer.destroy();
+        setGpuFailed(true);
+        setBackendPref('cpu');
+        return;
+      }
+      console.info('%c[Fractal Studio] WebGPURenderer initialized successfully!', 'color: #10b981; font-weight: bold;');
+
+      // Initial compile
+      const formulaState = useFormulaStore.getState();
+      formulaState.setFormula(formulaState.formulaText);
+      const compiled = useFormulaStore.getState();
+
+      if (compiled.compiledWGSL) {
+        const result = await renderer.compileFormula(
+          compiled.compiledWGSL,
+          compiled.parameters.map(p => p.name)
+        );
+        if (!result.success) {
+          // Firefox (and other strict WGSL implementations) may reject the
+          // shader even though device init succeeded — revert to CPU.
+          console.warn(`%c[Fractal Studio] WGSL pipeline rejected: ${result.error}. Reverting to Canvas2DRenderer...`, 'color: #f97316; font-weight: bold;');
+          renderer.destroy();
+          setGpuFailed(true);
+          setBackendPref('cpu');
+          return;
+        }
+      }
+
+      backendRef.current = 'webgpu';
+      setBackend('webgpu');
+      syncUniforms(renderer);
+      syncGradient(renderer);
+      renderer.start();
+      setInitialized(true);
+    };
+
+    if (backendPref === 'gpu') {
+      initWebGPU(canvas);
+    } else {
+      sizeCanvas();
+      initCanvas2D(canvas);
+    }
 
     return () => {
       cancelled = true;
@@ -216,7 +221,7 @@ export function Viewport() {
       if (r) r.destroy();
       rendererRef.current = null;
     };
-  }, []);
+  }, [backendPref, syncUniforms, syncGradient]);
 
   // ─── Subscribe to formula changes ─────────────────────
   useEffect(() => {
@@ -406,7 +411,10 @@ export function Viewport() {
 
   return (
     <div className="viewport-container" ref={containerRef}>
+      {/* key forces a fresh canvas per backend: a canvas that has had a
+          'webgpu' context can never acquire a '2d' context afterwards */}
       <canvas
+        key={backendPref}
         ref={canvasRef}
         className="viewport-canvas"
         onWheel={handleWheel}
@@ -416,14 +424,45 @@ export function Viewport() {
         onMouseLeave={handleMouseUp}
         onDoubleClick={handleDoubleClick}
       />
-      {backend === 'canvas2d' && (
-        <div className="viewport-fallback-badge" title="WebGPU is not available in this browser. Rendering with Canvas2D (CPU). For best performance, use Chrome or Edge.">
+      {backendPref === 'cpu' ? (
+        <div
+          className="viewport-fallback-badge"
+          title={gpuFailed
+            ? 'WebGPU was unavailable or failed earlier. Click to try GPU mode again.'
+            : 'Rendering with Canvas2D (CPU). Click to switch to WebGPU (GPU) rendering.'}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
           CPU Mode
+          <button
+            type="button"
+            className="viewport-badge-btn"
+            onClick={() => setBackendPref('gpu')}
+          >
+            {gpuFailed ? '↻ Try GPU' : '→ GPU'}
+          </button>
+        </div>
+      ) : (
+        <div
+          className="viewport-fallback-badge viewport-gpu-badge"
+          title="Rendering with WebGPU (GPU). Click the button to switch back to CPU rendering."
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="7" width="18" height="10" rx="2" />
+            <circle cx="17" cy="12" r="1.5" />
+            <path d="M6 11h5M6 13h5" />
+          </svg>
+          GPU Mode
+          <button
+            type="button"
+            className="viewport-badge-btn"
+            onClick={() => setBackendPref('cpu')}
+          >
+            → CPU
+          </button>
         </div>
       )}
       <div className="viewport-coords">

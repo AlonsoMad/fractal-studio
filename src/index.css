@@ -965,6 +965,39 @@ html, body {
   opacity: 0.7;
 }
 
+/* GPU-mode variant of the badge (same layout, GPU accent color) */
+.viewport-fallback-badge.viewport-gpu-badge {
+  color: var(--accent-cyan);
+  border-color: rgba(0, 240, 255, 0.25);
+  cursor: help;
+}
+
+/* Toggle button inside the CPU/GPU mode badge */
+.viewport-badge-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  margin-left: var(--sp-1);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.viewport-badge-btn:hover {
+  background: currentColor;
+  color: rgba(7, 7, 13, 0.9);
+}
+
+.viewport-badge-btn:active {
+  transform: translateY(1px);
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Julia Mode Toggle
    ════════════════════════════════════════════════════════════════════ */
