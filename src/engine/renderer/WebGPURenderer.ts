@@ -52,95 +52,131 @@ export class WebGPURenderer {
   private animFrameId = 0;
   private currentFormulaHash = '';
   private paramNames: string[] = [];
+  private deviceValid = true;
 
   // Pipeline cache
   private pipelineCache = new Map<string, { pipeline: GPUComputePipeline; bindGroupLayout: GPUBindGroupLayout }>();
 
   async init(canvas: HTMLCanvasElement): Promise<boolean> {
     if (!navigator.gpu) {
-      console.error('WebGPU not supported');
+      console.error('[WebGPURenderer] WebGPU not supported (navigator.gpu missing)');
       return false;
     }
 
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: 'high-performance',
-    });
-    if (!adapter) {
-      console.error('No GPU adapter found');
+    try {
+      // Some browsers (notably Firefox on certain driver stacks) return null
+      // for the high-performance preference but succeed with the default.
+      let adapter = await navigator.gpu.requestAdapter({
+        powerPreference: 'high-performance',
+      });
+      if (!adapter) {
+        console.warn('[WebGPURenderer] No adapter for high-performance preference, retrying with default');
+        adapter = await navigator.gpu.requestAdapter();
+      }
+      if (!adapter) {
+        console.error('[WebGPURenderer] No GPU adapter available');
+        return false;
+      }
+
+      this.device = await adapter.requestDevice({
+        requiredLimits: {
+          maxStorageTexturesPerShaderStage: 1,
+          maxComputeWorkgroupSizeX: 16,
+          maxComputeWorkgroupSizeY: 16,
+        },
+      });
+
+      // WebGPU reports most errors asynchronously, not by throwing. Without
+      // this handler an invalid pipeline silently renders nothing (black
+      // screen) instead of triggering the Canvas2D fallback.
+      this.device.addEventListener('uncapturederror', (event) => {
+        const err = (event as GPUUncapturedErrorEvent).error;
+        console.error(`[WebGPURenderer] Uncaptured GPU error (${err.constructor.name}): ${err.message}`);
+        this.deviceValid = false;
+      });
+      this.device.lost.then((info) => {
+        console.error(`[WebGPURenderer] GPU device lost (${info.reason}): ${info.message}`);
+        this.deviceValid = false;
+      });
+
+      const ctx = canvas.getContext('webgpu');
+      if (!ctx) {
+        console.error('[WebGPURenderer] Failed to get webgpu canvas context');
+        return false;
+      }
+      this.context = ctx;
+      this.format = navigator.gpu.getPreferredCanvasFormat();
+
+      this.context.configure({
+        device: this.device,
+        format: this.format,
+        alphaMode: 'premultiplied',
+      });
+
+      // Create uniform buffer
+      this.uniformBuffer = this.device.createBuffer({
+        size: UNIFORM_BUFFER_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+
+      // Create sampler for display
+      this.sampler = this.device.createSampler({
+        magFilter: 'linear',
+        minFilter: 'linear',
+      });
+
+      // Create display pipeline
+      const displayModule = this.device.createShaderModule({
+        code: displayWGSL,
+      });
+
+      this.displayPipeline = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: {
+          module: displayModule,
+          entryPoint: 'vs_main',
+        },
+        fragment: {
+          module: displayModule,
+          entryPoint: 'fs_main',
+          targets: [{ format: this.format }],
+        },
+        primitive: {
+          topology: 'triangle-list',
+        },
+      });
+
+      // Create default gradient texture
+      this.createGradientTexture([
+        { position: 0, color: [0, 7, 100] },
+        { position: 0.16, color: [32, 107, 203] },
+        { position: 0.42, color: [237, 255, 255] },
+        { position: 0.6425, color: [255, 170, 0] },
+        { position: 0.8575, color: [0, 2, 0] },
+        { position: 1, color: [0, 7, 100] },
+      ]);
+
+      // Set initial size
+      this.resize(canvas.width, canvas.height);
+
+      console.info(`[WebGPURenderer] Initialized successfully (Canvas: ${canvas.width}x${canvas.height}, Format: ${this.format})`);
+      return true;
+    } catch (err) {
+      console.error('[WebGPURenderer] Fatal error during initialization:', err);
       return false;
     }
-
-    this.device = await adapter.requestDevice({
-      requiredLimits: {
-        maxStorageTexturesPerShaderStage: 1,
-        maxComputeWorkgroupSizeX: 16,
-        maxComputeWorkgroupSizeY: 16,
-      },
-    });
-
-    this.context = canvas.getContext('webgpu')!;
-    this.format = navigator.gpu.getPreferredCanvasFormat();
-
-    this.context.configure({
-      device: this.device,
-      format: this.format,
-      alphaMode: 'premultiplied',
-    });
-
-    // Create uniform buffer
-    this.uniformBuffer = this.device.createBuffer({
-      size: UNIFORM_BUFFER_SIZE,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    // Create sampler for display
-    this.sampler = this.device.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
-    });
-
-    // Create display pipeline
-    const displayModule = this.device.createShaderModule({
-      code: displayWGSL,
-    });
-
-    this.displayPipeline = this.device.createRenderPipeline({
-      layout: 'auto',
-      vertex: {
-        module: displayModule,
-        entryPoint: 'vs_main',
-      },
-      fragment: {
-        module: displayModule,
-        entryPoint: 'fs_main',
-        targets: [{ format: this.format }],
-      },
-      primitive: {
-        topology: 'triangle-list',
-      },
-    });
-
-    // Create default gradient texture
-    this.createGradientTexture([
-      { position: 0, color: [0, 7, 100] },
-      { position: 0.16, color: [32, 107, 203] },
-      { position: 0.42, color: [237, 255, 255] },
-      { position: 0.6425, color: [255, 170, 0] },
-      { position: 0.8575, color: [0, 2, 0] },
-      { position: 1, color: [0, 7, 100] },
-    ]);
-
-    // Set initial size
-    this.resize(canvas.width, canvas.height);
-
-    return true;
   }
 
   /**
    * Compile a new formula shader.
+   *
+   * Returns a promise because WGSL compilation errors are only reported
+   * asynchronously (getCompilationInfo). Firefox's WGSL compiler is stricter
+   * than Chrome's, so a shader that works in Chrome can be rejected there —
+   * without this check the pipeline is silently invalid and renders black.
    */
-  compileFormula(userFormulaWGSL: string, paramNames: string[] = []): { success: boolean; error?: string } {
-    if (!this.device) return { success: false, error: 'WebGPU device not initialized' };
+  async compileFormula(userFormulaWGSL: string, paramNames: string[] = []): Promise<{ success: boolean; error?: string }> {
+    if (!this.device || !this.deviceValid) return { success: false, error: 'WebGPU device not initialized' };
     this.paramNames = paramNames;
 
     // Build the full shader source
@@ -178,21 +214,24 @@ export class WebGPURenderer {
       this.currentFormulaHash = hash;
       this.rebuildComputeBindGroup();
       this.dirty = true;
+      console.debug(`[WebGPURenderer] Using cached compute pipeline for formula (Hash: ${hash})`);
       return { success: true };
     }
 
     try {
       const module = this.device.createShaderModule({ code: shaderSource });
 
-      // Check for compilation errors
-      // Note: compilationInfo() is async but we proceed optimistically
-      module.getCompilationInfo().then(info => {
-        for (const msg of info.messages) {
-          if (msg.type === 'error') {
-            console.error(`Shader error at line ${msg.lineNum}: ${msg.message}`);
-          }
-        }
-      });
+      // WGSL errors are NOT thrown — they arrive asynchronously via
+      // compilationInfo. Await them and treat any error as a hard failure so
+      // the caller can fall back to Canvas2D instead of rendering black.
+      const info = await module.getCompilationInfo();
+      const errors = info.messages.filter(m => m.type === 'error');
+      if (errors.length > 0) {
+        const first = errors[0];
+        const msg = `Shader compile error at line ${first.lineNum}:${first.linePos} — ${first.message}`;
+        console.error(`[WebGPURenderer] ${msg} (${errors.length} error(s) total)`);
+        return { success: false, error: msg };
+      }
 
       const pipeline = this.device.createComputePipeline({
         layout: 'auto',
@@ -209,10 +248,11 @@ export class WebGPURenderer {
       this.rebuildComputeBindGroup();
       this.dirty = true;
 
+      console.info(`[WebGPURenderer] Compiled compute pipeline for formula successfully (Hash: ${hash})`);
       return { success: true };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error('Shader compilation failed:', msg);
+      console.error('[WebGPURenderer] Shader compilation failed:', msg);
       return { success: false, error: msg };
     }
   }
@@ -392,6 +432,7 @@ export class WebGPURenderer {
   };
 
   private render(): void {
+    if (!this.deviceValid) return;
     if (!this.computePipeline || !this.computeBindGroup || !this.outputTexture) return;
 
     const encoder = this.device.createCommandEncoder();

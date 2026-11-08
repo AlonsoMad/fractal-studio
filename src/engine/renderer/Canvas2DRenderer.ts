@@ -132,7 +132,7 @@ export class Canvas2DRenderer {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     if (!this.ctx) {
-      console.error('Canvas2D context not available');
+      console.error('[Canvas2DRenderer] Canvas2D context not available');
       return false;
     }
 
@@ -152,6 +152,7 @@ export class Canvas2DRenderer {
       { position: 1, color: [0, 7, 100] },
     ]);
 
+    console.info(`[Canvas2DRenderer] Initialized successfully (Canvas: ${canvas.width}x${canvas.height}, Render Target: ${this.renderWidth}x${this.renderHeight} @ ${this.RENDER_SCALE * 100}%)`);
     return true;
   }
 
@@ -168,10 +169,11 @@ export class Canvas2DRenderer {
       }
       this.currentAST = ast;
       this.dirty = true;
+      console.info(`[Canvas2DRenderer] Compiled formula AST for CPU execution (Mode: ${mode})`);
       return { success: true };
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error('Canvas2D formula compilation failed:', msg);
+      console.error('[Canvas2DRenderer] Formula compilation failed:', msg);
       return { success: false, error: msg };
     }
   }

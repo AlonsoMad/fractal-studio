@@ -269,7 +269,7 @@ export function compileFormula(ast: ASTNode): CompiledFormula {
 
   try {
     // eslint-disable-next-line no-new-func
-    return new Function(
+    const fn = new Function(
       'startZRe', 'startZIm',
       'cRe', 'cIm',
       'params',
@@ -277,8 +277,10 @@ export function compileFormula(ast: ASTNode): CompiledFormula {
       'escapeR2',
       src,
     ) as CompiledFormula;
+    console.debug('[ASTEvaluator] Successfully JIT-compiled CPU formula function (fast path).');
+    return fn;
   } catch (err) {
-    console.warn("AmbientEngine JIT Compiler blocked (CSP?), falling back to interpreter.", err);
+    console.warn('[ASTEvaluator] JIT Compiler blocked (e.g. strict CSP / extension). Falling back to tree-walking interpreter (safe path).', err);
     return createInterpretedFallback(ast);
   }
 }
