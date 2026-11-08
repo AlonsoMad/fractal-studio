@@ -11,18 +11,34 @@ type RendererBackend = 'webgpu' | 'canvas2d';
  * Detects whether WebGPU is actually usable (not just that navigator.gpu exists).
  */
 async function detectWebGPU(): Promise<boolean> {
-  if (typeof navigator === 'undefined' || !navigator.gpu) return false;
+  console.groupCollapsed('%c[Fractal Studio] Checking WebGPU Capability & Compatibility...', 'color: #3b82f6; font-weight: bold;');
+  
+  if (typeof navigator === 'undefined' || !navigator.gpu) {
+    console.info('%c✗ navigator.gpu is NOT available (Browser does not support WebGPU or not in a secure context).', 'color: #ef4444; font-weight: bold;');
+    console.groupEnd();
+    return false;
+  }
+  console.info('%c✓ navigator.gpu API detected.', 'color: #10b981;');
 
   try {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) return false;
+    if (!adapter) {
+      console.info('%c✗ GPUAdapter request returned null (No hardware GPU adapter found matching requirements or blocked by browser flags).', 'color: #ef4444; font-weight: bold;');
+      console.groupEnd();
+      return false;
+    }
+    console.info(`%c✓ GPUAdapter obtained (Vendor: ${adapter.info?.vendor ?? 'unknown'}, Architecture: ${adapter.info?.architecture ?? 'unknown'}, Description: ${adapter.info?.description ?? 'unknown'})`, 'color: #10b981;');
 
     // Try to actually get a device — this is where it fails on Firefox nightly
     // even when navigator.gpu is partially exposed
     const device = await adapter.requestDevice();
+    console.info('%c✓ GPUDevice obtained successfully. WebGPU is fully supported and functional!', 'color: #10b981; font-weight: bold;');
     device.destroy();
+    console.groupEnd();
     return true;
-  } catch {
+  } catch (err) {
+    console.warn('%c✗ WebGPU capability check FAILED during device/adapter probe:', 'color: #f97316; font-weight: bold;', err);
+    console.groupEnd();
     return false;
   }
 }
@@ -90,6 +106,7 @@ export function Viewport() {
     let cancelled = false;
 
     const initRenderer = async () => {
+      console.info('%c[Fractal Studio] Starting GPU capability detection...', 'color: #3b82f6; font-weight: bold;');
       // Phase 1: Detect WebGPU support
       const webgpuAvailable = await detectWebGPU();
 
@@ -99,10 +116,12 @@ export function Viewport() {
       backendRef.current = selectedBackend;
       setBackend(selectedBackend);
 
+      console.info(`%c[Fractal Studio] Selected Rendering Backend: ${selectedBackend.toUpperCase()}`, 'color: #a855f7; font-weight: bold; font-size: 13px;');
+
       if (!webgpuAvailable) {
         console.info(
-          '%c[Fractal Studio] WebGPU not available — using Canvas2D fallback renderer.',
-          'color: #ffa500; font-weight: bold;'
+          '%c[Fractal Studio] WebGPU not available or device initialization failed — using Canvas2D (CPU + Web Worker JIT) fallback renderer.',
+          'color: #ffa500; font-weight: bold; font-size: 12px; background: rgba(255, 165, 0, 0.1); padding: 4px 8px; border-radius: 4px;'
         );
       }
 
@@ -117,16 +136,18 @@ export function Viewport() {
 
       // Phase 3: Initialize the chosen renderer
       if (selectedBackend === 'webgpu') {
+        console.info('[Fractal Studio] Initializing WebGPURenderer pipeline...');
         const renderer = new WebGPURenderer();
         rendererRef.current = renderer;
 
         const ok = await renderer.init(canvas);
         if (!ok) {
           // WebGPU init failed at device level — fall back
-          console.warn('WebGPU initialization failed, falling back to Canvas2D');
+          console.warn('%c[Fractal Studio] WebGPURenderer.init() returned false or threw error. Falling back to Canvas2DRenderer...', 'color: #f97316; font-weight: bold;');
           renderer.destroy();
           return initCanvas2D(canvas);
         }
+        console.info('%c[Fractal Studio] WebGPURenderer initialized successfully!', 'color: #10b981; font-weight: bold;');
 
         // Initial compile
         const formulaState = useFormulaStore.getState();
@@ -134,10 +155,17 @@ export function Viewport() {
         const compiled = useFormulaStore.getState();
 
         if (compiled.compiledWGSL) {
-          renderer.compileFormula(
+          const result = await renderer.compileFormula(
             compiled.compiledWGSL,
             compiled.parameters.map(p => p.name)
           );
+          if (!result.success) {
+            // Firefox (and other strict WGSL implementations) may reject the
+            // shader even though device init succeeded — fall back to CPU.
+            console.warn(`%c[Fractal Studio] WGSL pipeline rejected: ${result.error}. Falling back to Canvas2DRenderer...`, 'color: #f97316; font-weight: bold;');
+            renderer.destroy();
+            return initCanvas2D(canvas);
+          }
         }
 
         syncUniforms(renderer);
@@ -152,6 +180,7 @@ export function Viewport() {
     const initCanvas2D = (canvas: HTMLCanvasElement) => {
       if (cancelled) return;
 
+      console.info('[Fractal Studio] Initializing Canvas2DRenderer (CPU Fallback) pipeline...');
       const renderer = new Canvas2DRenderer();
       rendererRef.current = renderer;
       backendRef.current = 'canvas2d';
@@ -159,9 +188,10 @@ export function Viewport() {
 
       const ok = renderer.init(canvas);
       if (!ok) {
-        console.error('Canvas2D initialization failed');
+        console.error('[Fractal Studio] Canvas2DRenderer initialization failed!');
         return;
       }
+      console.info('%c[Fractal Studio] Canvas2DRenderer (CPU Fallback) initialized successfully!', 'color: #10b981; font-weight: bold;');
 
       // Initial compile from AST
       const formulaState = useFormulaStore.getState();
@@ -203,7 +233,11 @@ export function Viewport() {
           webgpu.compileFormula(
             state.compiledWGSL,
             state.parameters.map(p => p.name)
-          );
+          ).then(result => {
+            if (!result.success) {
+              console.error(`[Fractal Studio] WGSL recompile failed: ${result.error}`);
+            }
+          });
           syncUniforms(webgpu);
         }
       } else {
