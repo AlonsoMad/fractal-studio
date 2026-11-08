@@ -119,11 +119,57 @@ function emitNode(
           break;
         }
         case '^': {
-          // z^w = exp(w * log(z))   — general complex power
+          // Integer exponents: repeated multiplication. The general
+          // exp(w·log z) form below is NaN-poisoned at z = 0 (log(0) =
+          // -Infinity, and the exponent's zero imaginary part turns
+          // 0 · -Infinity into NaN) — Mandelbrot-style iteration starts at
+          // z = 0, so every pixel "escaped" on iteration 0 and the CPU
+          // renderer painted a single flat color.
+          const expNode = node.right;
+          if (
+            expNode.type === 'NumberLiteral' &&
+            Number.isInteger(expNode.value) &&
+            Math.abs(expNode.value) <= 64
+          ) {
+            const n = expNode.value;
+            if (n === 0) {
+              lines.push(`const ${v}Re = 1;`);
+              lines.push(`const ${v}Im = 0;`);
+            } else if (n === 1) {
+              lines.push(`const ${v}Re = ${L.re};`);
+              lines.push(`const ${v}Im = ${L.im};`);
+            } else {
+              let accRe = L.re;
+              let accIm = L.im;
+              const abs = Math.abs(n);
+              for (let k = 1; k < abs; k++) {
+                const rv = freshVar();
+                lines.push(`const ${rv}Re = ${accRe} * ${L.re} - ${accIm} * ${L.im};`);
+                lines.push(`const ${rv}Im = ${accRe} * ${L.im} + ${accIm} * ${L.re};`);
+                accRe = `${rv}Re`;
+                accIm = `${rv}Im`;
+              }
+              if (n > 0) {
+                lines.push(`const ${v}Re = ${accRe};`);
+                lines.push(`const ${v}Im = ${accIm};`);
+              } else {
+                // Negative exponent: reciprocal of the positive power
+                const dv = freshVar();
+                lines.push(`const ${dv}D = ${accRe} * ${accRe} + ${accIm} * ${accIm};`);
+                lines.push(`const ${v}Re = ${dv}D === 0 ? Infinity : ${accRe} / ${dv}D;`);
+                lines.push(`const ${v}Im = ${dv}D === 0 ? Infinity : -(${accIm}) / ${dv}D;`);
+              }
+            }
+            break;
+          }
+
+          // General complex power z^w = exp(w · log(z)); z = 0 → (0, 0),
+          // matching Complex.pow and the WGSL complex_pow helper.
           // log(z): r = sqrt(re²+im²), logRe = log(r), logIm = atan2(im,re)
           const lv = freshVar();
           lines.push(`const ${lv}R = Math.sqrt(${L.re} * ${L.re} + ${L.im} * ${L.im});`);
-          lines.push(`const ${lv}LRe = ${lv}R === 0 ? -Infinity : Math.log(${lv}R);`);
+          lines.push(`const ${lv}Is0 = ${lv}R < 1e-30;`);
+          lines.push(`const ${lv}LRe = ${lv}Is0 ? 0 : Math.log(${lv}R);`);
           lines.push(`const ${lv}LIm = Math.atan2(${L.im}, ${L.re});`);
           // w * log(z):
           const mv = freshVar();
@@ -132,8 +178,9 @@ function emitNode(
           // exp(w*log(z)):
           const ev = freshVar();
           lines.push(`const ${ev}E = Math.exp(${mv}Re);`);
-          lines.push(`const ${v}Re = ${ev}E * Math.cos(${mv}Im);`);
-          lines.push(`const ${v}Im = ${ev}E * Math.sin(${mv}Im);`);
+          lines.push(`let ${v}Re = ${ev}E * Math.cos(${mv}Im);`);
+          lines.push(`let ${v}Im = ${ev}E * Math.sin(${mv}Im);`);
+          lines.push(`if (${lv}Is0) { ${v}Re = 0; ${v}Im = 0; }`);
           break;
         }
       }

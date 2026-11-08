@@ -385,6 +385,12 @@ export function Viewport() {
 
 
   // ─── Render ────────────────────────────────────────────
+  // Hooks MUST run unconditionally: the backend-detection early return below
+  // changes the hook count between renders otherwise, which crashes React
+  // ("Rendered more hooks than during the previous render") and blanks the app.
+  const nav = useNavigationStore();
+  const zoomLevel = (3 / nav.zoom).toFixed(1);
+
   // Still detecting backend...
   if (backend === null) {
     return (
@@ -397,9 +403,6 @@ export function Viewport() {
       </div>
     );
   }
-
-  const nav = useNavigationStore();
-  const zoomLevel = (3 / nav.zoom).toFixed(1);
 
   return (
     <div className="viewport-container" ref={containerRef}>
